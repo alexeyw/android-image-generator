@@ -7,7 +7,7 @@ An open-source Android demo that runs **[Z-Image-Turbo](https://huggingface.co/T
 prompt in, 256×256 image out, no server. Inference uses Google's LiteRT `CompiledModel` over the int8
 graphs published at [`litert-community/Z-Image-Turbo-LiteRT`](https://huggingface.co/litert-community/Z-Image-Turbo-LiteRT).
 
-| On a Galaxy S25 Ultra, 32 s | Reference pipeline (Mac) | Reference pipeline (Mac) |
+| On a Galaxy S25 Ultra, 29 s | Reference pipeline (Mac) | Reference pipeline (Mac) |
 |---|---|---|
 | ![cabin](docs/s25_cabin_seed11.png) | ![apple](docs/reference_apple_seed42.png) | ![corgi](docs/reference_corgi_seed7.png) |
 | "a cozy cabin in a snowy forest at night, warm light in the windows" · seed 11 | "a red apple on a wooden table, studio lighting" · seed 42 | "a corgi astronaut floating in space, digital art" · seed 7 |
@@ -91,16 +91,16 @@ logcat under the `ZImage` / `ZImageRuntime` tags):
 
 ```bash
 adb shell am start -n io.github.alexeyw.zimage/.MainActivity --ez autorun true \
-  --es prompt "a red fox in fresh snow" --el seed 7 --ei steps 8 --es backend CPU --ei threads 4
+  --es prompt "a red fox in fresh snow" --el seed 7 --ei steps 8 --es backend CPU --ei threads 6
 ```
 
 ## Performance
 
-Galaxy S25 Ultra (Snapdragon 8 Elite, 12 GB, Android 16), 256×256, 8 steps, measured 2026-09-29:
+Galaxy S25 Ultra (Snapdragon 8 Elite, 12 GB, Android 16), 256×256, 8 steps, measured 2026-09-29/30:
 
 | Mode | Per image | Notes |
 |---|---|---|
-| **CPU, warm cache (default)** | **32 s** | text encoder 2.2 s, DiT shard ~0.5 s × 6 × 8, VAE 1.1 s |
+| **CPU, 6 threads, warm cache (default)** | **29 s** | text encoder 2.0 s, DiT 21.8 s, VAE 1.1 s |
 | CPU, first run after install | 60 s | includes writing the 9.1 GB XNNPACK weight cache |
 | GPU, graphs streamed | 284 s | a shard runs in 0.2 s but reloads in ~4 s every step |
 | GPU, shards resident | killed | ~1.3 GB per resident shard; lmkd kills the app at the 5th |
@@ -110,8 +110,24 @@ On the GPU, with `precision = FP32` (FP16 overflows to NaN in adaLN) lmkd kills 
 `allowSrcQuantizedFcConvOps` makes it fit (4.4 GB peak), but quantizes the activations too: the image stays coherent but drifts from the
 CPU result (17 dB PSNR). A phone with 16 GB+ may be able to keep all shards resident; untested.
 
-The CPU thread count (4) has not been tuned yet: a comparison of 4/6/8 threads was spoiled by thermal
-throttling (thermal status 2 after back-to-back runs).
+### CPU threads
+
+[`scripts/bench_threads.py`](scripts/bench_threads.py) runs the same prompt and seed with each thread count,
+interleaved (4, 6, 8, 6, 8, 4, 8, 4, 6) and with a cool-down before every run:
+
+| XNNPACK threads | Runs | Median |
+|---|---|---|
+| 4 | 43.5\* · 31.8 · 36.6 s | 36.6 s |
+| **6** | **28.8 · 28.1 · 28.8 s** | **28.8 s** |
+| 8 | 51.4 · 29.8 · 36.3 s | 36.3 s |
+
+\* The first run after reinstalling the APK; a separate check put that penalty at ~6 s (35.3 s, then
+29.3 s with 6 threads). Without it, 4 threads is still slower than 6.
+
+Six threads was both the fastest and the steadiest; all nine images were pixel-identical. The S25 Ultra
+has six 3.53 GHz and two 4.47 GHz cores; the app uses "cores minus two, at most six", which is 6 there and
+an untested guess elsewhere. Caveats: the phone was charging over USB, and the cool-down usually hit its
+7-minute cap at 31–35 °C instead of returning to the 28 °C idle temperature.
 
 ## Reference pipeline (Mac / Linux)
 
