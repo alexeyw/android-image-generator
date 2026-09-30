@@ -1,0 +1,17 @@
+# Model weights and derived host assets (~10.6 GB), fetched by scripts/download_graphs.sh and reference/host_assets.py
+/models/litert/
+/models/host/
+/models/*.log
+/out/
+/.venv/
+__pycache__/
+
+# Android / Gradle
+.gradle/
+build/
+/local.properties
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+captures/

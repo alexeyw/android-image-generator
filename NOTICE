@@ -1,0 +1,11 @@
+Z-Image Turbo on Android
+Copyright 2026 Aleksei Volodin
+
+This product includes software adapted from hf-to-litertlm
+(https://github.com/john-rocky/hf-to-litertlm), Copyright 2026 Daisuke Majima,
+licensed under the Apache License, Version 2.0:
+  app/src/main/java/io/github/alexeyw/zimage/pipeline/QwenTokenizer.kt
+
+Model weights are not part of this repository. At runtime the app downloads:
+  - litert-community/Z-Image-Turbo-LiteRT (Apache-2.0)
+  - selected tensors and tokenizer files of Tongyi-MAI/Z-Image-Turbo (Apache-2.0)

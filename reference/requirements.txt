@@ -1,0 +1,4 @@
+ai-edge-litert==2.2.0
+numpy
+tokenizers
+pillow
