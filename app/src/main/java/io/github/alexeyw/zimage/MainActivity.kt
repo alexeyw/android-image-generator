@@ -15,17 +15,18 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.platform.LocalContext
 import io.github.alexeyw.zimage.pipeline.Backend
-import io.github.alexeyw.zimage.ui.MainScreen
+import io.github.alexeyw.zimage.ui.ZImageApp
 import io.github.alexeyw.zimage.ui.MainViewModel
 
 /**
- * Single-screen demo. Also drivable from a shell for device benchmarks:
+ * The generator and its history. Also drivable from a shell for device benchmarks:
  *
  *   adb shell am start -n io.github.alexeyw.zimage/.MainActivity --ez autorun true \
  *     --es prompt "a red fox in fresh snow" --el seed 7 --ei steps 8 \
  *     --es backend CPU --ei threads 6
  *
- * The PNG lands in Android/data/io.github.alexeyw.zimage/files/outputs/, timings in logcat (tag ZImage).
+ * The run is saved to the history (Android/data/io.github.alexeyw.zimage/files/history/, PNG + JSON),
+ * timings go to logcat (tag ZImage). The extras apply to this run only; the saved form is untouched.
  */
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -42,7 +43,7 @@ class MainActivity : ComponentActivity() {
                 dark -> darkColorScheme()
                 else -> lightColorScheme()
             }
-            MaterialTheme(colorScheme = colors) { MainScreen(vm) }
+            MaterialTheme(colorScheme = colors) { ZImageApp(vm) }
         }
         if (savedInstanceState == null) handleAutorun(intent)
     }
@@ -54,19 +55,13 @@ class MainActivity : ComponentActivity() {
 
     private fun handleAutorun(intent: Intent) {
         if (!intent.getBooleanExtra("autorun", false)) return
-        intent.getStringExtra("prompt")?.let(vm::setPrompt)
-        if (intent.hasExtra("seed")) vm.setSeed(intent.getLongExtra("seed", 42))
-        if (intent.hasExtra("steps")) vm.setSteps(intent.getIntExtra("steps", 8))
-        val backend = intent.getStringExtra("backend")?.let { runCatching { Backend.valueOf(it) }.getOrNull() }
-        val policy = vm.state.value.policy
-        vm.setPolicy(
-            policy.copy(
-                ditBackend = backend ?: policy.ditBackend,
-                keepDitResident = intent.getBooleanExtra("keep", policy.keepDitResident),
-                cpuThreads = intent.getIntExtra("threads", policy.cpuThreads),
-            ),
+        vm.runHeadless(
+            prompt = intent.getStringExtra("prompt"),
+            seed = if (intent.hasExtra("seed")) intent.getLongExtra("seed", 42) else null,
+            steps = if (intent.hasExtra("steps")) intent.getIntExtra("steps", 8) else null,
+            backend = intent.getStringExtra("backend")?.let { runCatching { Backend.valueOf(it) }.getOrNull() },
+            keep = if (intent.hasExtra("keep")) intent.getBooleanExtra("keep", false) else null,
+            threads = if (intent.hasExtra("threads")) intent.getIntExtra("threads", 0) else null,
         )
-        vm.setRandomSeed(false)
-        vm.generate()
     }
 }

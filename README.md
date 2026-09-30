@@ -35,6 +35,9 @@ seeded noise ─► for each of 8 steps:                                        
 - **GPU is an experimental switch.** See [Performance](#performance) for why it is not the default on 12 GB.
 - **Prompt budget:** the 256 px graphs take a fixed 32-token caption, chat template included, so a prompt
   can be about 23 tokens. The app counts tokens as you type.
+- **History:** every image is kept with its prompt, seed, steps, accelerator and thread count
+  (`files/history/<id>.png` + `<id>.json`); from the history you can reuse those settings, save the image
+  to the gallery, or delete one or all entries. The form itself is remembered between launches.
 
 ### Things the model card does not say
 
@@ -86,8 +89,8 @@ python3 -m venv .venv && .venv/bin/pip install -r reference/requirements.txt   #
 scripts/push_models.sh
 ```
 
-Headless run from a shell (PNG in `Android/data/io.github.alexeyw.zimage/files/outputs/`, timings in
-logcat under the `ZImage` / `ZImageRuntime` tags):
+Headless run from a shell (the result goes to the history, `Android/data/io.github.alexeyw.zimage/files/history/`;
+timings to logcat under the `ZImage` / `ZImageRuntime` tags; the extras do not change the saved form):
 
 ```bash
 adb shell am start -n io.github.alexeyw.zimage/.MainActivity --ez autorun true \
@@ -117,16 +120,15 @@ interleaved (4, 6, 8, 6, 8, 4, 8, 4, 6) and with a cool-down before every run:
 
 | XNNPACK threads | Runs | Median |
 |---|---|---|
-| 4 | 43.5\* · 31.8 · 36.6 s | 36.6 s |
+| 4 | 43.5 · 31.8 · 36.6 s | 36.6 s |
 | **6** | **28.8 · 28.1 · 28.8 s** | **28.8 s** |
 | 8 | 51.4 · 29.8 · 36.3 s | 36.3 s |
 
-\* The first run after reinstalling the APK; a separate check put that penalty at ~6 s (35.3 s, then
-29.3 s with 6 threads). Without it, 4 threads is still slower than 6.
-
-Six threads was both the fastest and the steadiest; all nine images were pixel-identical. The S25 Ultra
+Six threads was both the fastest and the steadiest (0.7 s spread against 12–22 s for 4 and 8); all nine
+images were pixel-identical. Later single runs agreed: 29.3 and 29.4 s with 6 threads. The S25 Ultra
 has six 3.53 GHz and two 4.47 GHz cores; the app uses "cores minus two, at most six", which is 6 there and
-an untested guess elsewhere. Caveats: the phone was charging over USB, and the cool-down usually hit its
+an untested guess elsewhere. The *CPU threads* slider in the app overrides it (it also applies to the text
+encoder, which always runs on the CPU), and the result line under the image shows the count used. Caveats: the phone was charging over USB, and the cool-down usually hit its
 7-minute cap at 31–35 °C instead of returning to the 28 °C idle temperature.
 
 ## Reference pipeline (Mac / Linux)
@@ -163,6 +165,8 @@ need (`reference/host_assets.py --skip-embed`) so all of them run on every push.
 | `app/.../pipeline/GraphRunner.kt` | LiteRT `CompiledModel` loading, CPU/GPU choice, weight caches, fallback |
 | `app/.../pipeline/ZImagePipeline.kt` | The generation loop |
 | `app/.../download/ModelDownloader.kt` | Hugging Face download with Range-based safetensors extraction |
+| `app/.../data/HistoryStore.kt`, `SettingsStore.kt` | Generation history (PNG + JSON files) and the saved form |
+| `app/.../ui/` | Compose screens: generator, history grid, history entry |
 | `reference/` | Python reference pipeline, host-asset extractor, fixture generator |
 
 ## Credits and licenses

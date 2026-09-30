@@ -3,16 +3,22 @@ package io.github.alexeyw.zimage.ui
 import android.app.Application
 import android.content.ContentValues
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import io.github.alexeyw.zimage.data.HistoryEntry
+import io.github.alexeyw.zimage.data.HistoryStore
+import io.github.alexeyw.zimage.data.Settings
+import io.github.alexeyw.zimage.data.SettingsStore
 import io.github.alexeyw.zimage.download.ModelDownloader
 import io.github.alexeyw.zimage.pipeline.Backend
 import io.github.alexeyw.zimage.pipeline.RuntimePolicy
 import io.github.alexeyw.zimage.pipeline.ZImageMath
 import io.github.alexeyw.zimage.pipeline.ZImagePipeline
+import io.github.alexeyw.zimage.pipeline.defaultCpuThreads
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +29,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.Locale
 import kotlin.random.Random
 
 data class UiState(
@@ -32,7 +40,7 @@ data class UiState(
     val modelBytesPresent: Long = 0,
     val downloading: Boolean = false,
     val downloadFile: String = "",
-    val prompt: String = "a red apple on a wooden table, studio lighting",
+    val prompt: String = DEFAULT_PROMPT,
     val tokenCount: Int? = null,
     val seed: Long = 42,
     val randomSeed: Boolean = false,
@@ -45,28 +53,48 @@ data class UiState(
     val lastSeed: Long? = null,
     val summary: String? = null,
     val error: String? = null,
+    val history: List<HistoryEntry> = emptyList(),
 ) {
     val modelsReady get() = missingFiles.isEmpty()
     val tokenBudgetExceeded get() = (tokenCount ?: 0) > ZImageMath.CAP_LEN
+
+    fun settings() = Settings(prompt, seed, randomSeed, steps, policy)
+
+    companion object {
+        const val DEFAULT_PROMPT = "a red apple on a wooden table, studio lighting"
+    }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
-    private val modelRoot = File(requireNotNull(app.getExternalFilesDir(null)), "models")
-    private val outputDir = File(requireNotNull(app.getExternalFilesDir(null)), "outputs")
+    private val filesRoot = requireNotNull(app.getExternalFilesDir(null))
+    private val modelRoot = File(filesRoot, "models")
     private val downloader = ModelDownloader(modelRoot)
+
+    // In the app's external files so `adb pull` can reach it: <id>.png + <id>.json per generation.
+    private val historyStore = HistoryStore(File(filesRoot, "history"))
 
     // Weight caches are keyed by the pinned model revision. XNNPACK's staleness check appears to
     // cover its own build stamp (per its log strings), with no sign of comparing model bytes, so
     // packed weights of an older revision must never be found at the path of a newer one.
     private val cacheDir = File(app.cacheDir, "graphs-" + ModelDownloader.LITERT_REVISION.take(12))
 
+    /** Upper bound of the thread picker: every core the process may use. */
+    val maxCpuThreads: Int = Runtime.getRuntime().availableProcessors()
+    val defaultCpuThreads: Int = defaultCpuThreads()
+
+    private val settingsStore = SettingsStore(app, maxCpuThreads)
+
     // LiteRT objects are created, run and closed on this one thread.
     private val engine = Dispatchers.Default.limitedParallelism(1)
     private var pipeline: ZImagePipeline? = null
     private var job: Job? = null
 
-    private val _state = MutableStateFlow(UiState())
+    private val _state = MutableStateFlow(
+        settingsStore.load(UiState().settings()).let { s ->
+            UiState(prompt = s.prompt, seed = s.seed, randomSeed = s.randomSeed, steps = s.steps, policy = s.policy)
+        },
+    )
     val state: StateFlow<UiState> = _state
 
     init {
@@ -75,6 +103,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         downloader.graphDir.mkdirs()
         downloader.hostDir.mkdirs()
         viewModelScope.launch(Dispatchers.IO) { dropStaleCaches(app.cacheDir) }
+        viewModelScope.launch(Dispatchers.IO) { loadHistory() }
         refreshModels()
     }
 
@@ -85,6 +114,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (stale) {
                 Log.i(TAG, "dropping stale cache ${f.name}")
                 f.deleteRecursively()
+            }
+        }
+    }
+
+    /** Lists the history and, on a fresh start, shows the newest image again. */
+    private fun loadHistory() {
+        val entries = historyStore.list()
+        val latest = entries.firstOrNull()
+        val bitmap = latest?.let { BitmapFactory.decodeFile(it.image.path) }
+        _state.update {
+            if (it.image != null || bitmap == null) {
+                it.copy(history = entries)
+            } else {
+                it.copy(history = entries, image = bitmap, lastSeed = latest.seed, summary = headline(latest))
             }
         }
     }
@@ -120,18 +163,73 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- the generator form: every change is persisted -----------------------------------------------
+
     fun setPrompt(p: String) {
         _state.update { it.copy(prompt = p) }
+        persist()
         countTokens()
     }
 
-    fun setSeed(s: Long) = _state.update { it.copy(seed = s) }
+    fun setSeed(s: Long) = edit { it.copy(seed = s) }
 
-    fun setRandomSeed(r: Boolean) = _state.update { it.copy(randomSeed = r) }
+    fun setRandomSeed(r: Boolean) = edit { it.copy(randomSeed = r) }
 
-    fun setSteps(n: Int) = _state.update { it.copy(steps = n.coerceIn(1, 16)) }
+    fun setSteps(n: Int) = edit { it.copy(steps = n.coerceIn(1, 16)) }
+
+    fun setCpuThreads(n: Int) = setPolicy(_state.value.policy.copy(cpuThreads = n.coerceIn(1, maxCpuThreads)))
 
     fun setPolicy(p: RuntimePolicy) {
+        applyPolicy(p)
+        persist()
+    }
+
+    /** Loads prompt, seed and configuration of a past generation into the form. */
+    fun reuse(e: HistoryEntry) {
+        _state.update { it.copy(prompt = e.prompt, seed = e.seed, randomSeed = false, steps = e.steps) }
+        applyPolicy(
+            RuntimePolicy(
+                ditBackend = e.backend,
+                keepDitResident = e.keepDitResident,
+                cpuThreads = e.cpuThreads.coerceIn(1, maxCpuThreads),
+            ),
+        )
+        persist()
+        countTokens()
+    }
+
+    /**
+     * Shell-driven run (see MainActivity): uses the given values for this generation without
+     * overwriting what the user saved in the form.
+     */
+    fun runHeadless(prompt: String?, seed: Long?, steps: Int?, backend: Backend?, keep: Boolean?, threads: Int?) {
+        _state.update {
+            it.copy(
+                prompt = prompt ?: it.prompt,
+                seed = seed ?: it.seed,
+                randomSeed = false,
+                steps = (steps ?: it.steps).coerceIn(1, 16),
+            )
+        }
+        val p = _state.value.policy
+        applyPolicy(
+            p.copy(
+                ditBackend = backend ?: p.ditBackend,
+                keepDitResident = keep ?: p.keepDitResident,
+                cpuThreads = (threads ?: p.cpuThreads).coerceIn(1, maxCpuThreads),
+            ),
+        )
+        generate()
+    }
+
+    private fun edit(change: (UiState) -> UiState) {
+        _state.update(change)
+        persist()
+    }
+
+    private fun persist() = settingsStore.save(_state.value.settings())
+
+    private fun applyPolicy(p: RuntimePolicy) {
         if (p == _state.value.policy) return
         _state.update { it.copy(policy = p) }
         viewModelScope.launch(engine) {
@@ -151,6 +249,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // --- generation -----------------------------------------------------------------------------------
+
     fun generate() {
         val s = _state.value
         if (s.generating || !s.modelsReady || s.tokenBudgetExceeded) return
@@ -164,11 +264,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val bmp = Bitmap.createBitmap(result.argb, ZImageMath.IMAGE_PX, ZImageMath.IMAGE_PX, Bitmap.Config.ARGB_8888)
-                val file = withContext(Dispatchers.IO) { saveOutput(bmp, seed, s.steps) }
-                val summary = summarize(result)
-                Log.i(TAG, "generated ${file.name} in ${"%.1f".format(result.seconds)}s\n$summary")
+                val entry = withContext(Dispatchers.IO) {
+                    val png = ByteArrayOutputStream().also { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+                    historyStore.add(
+                        png = png,
+                        prompt = s.prompt,
+                        seed = seed,
+                        steps = s.steps,
+                        backend = s.policy.ditBackend,
+                        keepDitResident = s.policy.keepDitResident,
+                        cpuThreads = s.policy.cpuThreads,
+                        seconds = result.seconds,
+                        modelRevision = ModelDownloader.LITERT_REVISION,
+                    )
+                }
+                val timings = summarize(result)
+                Log.i(TAG, "generated ${entry.image.name} in ${"%.1f".format(result.seconds)}s\n$timings")
                 _state.update {
-                    it.copy(image = bmp, lastSeed = seed, summary = "${"%.1f".format(result.seconds)} s · seed $seed\n$summary")
+                    it.copy(image = bmp, lastSeed = seed, summary = headline(entry) + "\n" + timings, history = listOf(entry) + it.history)
                 }
             } catch (e: CancellationException) {
                 _state.update { it.copy(stage = "Cancelled") }
@@ -186,9 +299,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         job?.cancel()
     }
 
+    // --- history ---------------------------------------------------------------------------------------
+
+    fun deleteHistory(e: HistoryEntry) {
+        _state.update { it.copy(history = it.history - e) }
+        viewModelScope.launch(Dispatchers.IO) { historyStore.delete(e) }
+    }
+
+    fun clearHistory() {
+        _state.update { it.copy(history = emptyList()) }
+        viewModelScope.launch(Dispatchers.IO) { historyStore.clear() }
+    }
+
     fun saveToGallery() {
         val bmp = _state.value.image ?: return
-        val name = "zimage_${_state.value.lastSeed}_${System.currentTimeMillis()}.png"
+        saveToGallery(bmp, _state.value.lastSeed)
+    }
+
+    fun saveToGallery(e: HistoryEntry) {
+        viewModelScope.launch(Dispatchers.IO) {
+            BitmapFactory.decodeFile(e.image.path)?.let { saveToGallery(it, e.seed) }
+        }
+    }
+
+    private fun saveToGallery(bmp: Bitmap, seed: Long?) {
+        val name = "zimage_${seed}_${System.currentTimeMillis()}.png"
         viewModelScope.launch(Dispatchers.IO) {
             val resolver = getApplication<Application>().contentResolver
             val values = ContentValues().apply {
@@ -207,13 +342,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pipeline ?: ZImagePipeline(modelRoot, cacheDir, _state.value.policy)
             .also { pipeline = it }
 
-    private fun saveOutput(bmp: Bitmap, seed: Long, steps: Int): File {
-        outputDir.mkdirs()
-        val f = File(outputDir, "zimage_seed${seed}_steps${steps}_${System.currentTimeMillis()}.png")
-        f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        return f
-    }
-
     private fun summarize(r: ZImagePipeline.Result): String = r.timings.entries.joinToString("\n") { (name, runs) ->
         val load = runs.sumOf { it.first } / 1000.0
         val run = runs.sumOf { it.second } / 1000.0
@@ -230,5 +358,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         private const val TAG = "ZImage"
+
+        fun headline(e: HistoryEntry): String =
+            String.format(Locale.getDefault(), "%.1f s · seed %d · %d CPU threads", e.seconds, e.seed, e.cpuThreads)
     }
 }

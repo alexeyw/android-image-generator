@@ -27,9 +27,15 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,9 +50,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.alexeyw.zimage.pipeline.Backend
 import io.github.alexeyw.zimage.pipeline.ZImageMath
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
-fun MainScreen(vm: MainViewModel) {
+fun MainScreen(vm: MainViewModel, onOpenHistory: () -> Unit) {
     val s by vm.state.collectAsStateWithLifecycle()
     KeepScreenOn(s.downloading || s.generating)
 
@@ -59,7 +66,10 @@ fun MainScreen(vm: MainViewModel) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Z-Image Turbo", style = MaterialTheme.typography.headlineSmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Z-Image Turbo", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+            TextButton(onClick = onOpenHistory) { Text("History (${s.history.size})") }
+        }
         Text(
             "6B text-to-image, fully on this phone via LiteRT. 256 × 256.",
             style = MaterialTheme.typography.bodyMedium,
@@ -121,9 +131,24 @@ private fun ModelsCard(s: UiState, vm: MainViewModel) {
 @Composable
 private fun GeneratorCard(s: UiState, vm: MainViewModel) {
     val busy = s.generating
+    // Same pattern as the seed: typing goes to local state first, so a late state echo cannot
+    // reset the cursor or drop characters; external changes (history) are adopted.
+    var promptText by rememberSaveable { mutableStateOf(s.prompt) }
+    var sentPrompt by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(s.prompt) {
+        val current = vm.state.value.prompt
+        if (current != sentPrompt) {
+            promptText = current
+            sentPrompt = current
+        }
+    }
     OutlinedTextField(
-        value = s.prompt,
-        onValueChange = vm::setPrompt,
+        value = promptText,
+        onValueChange = {
+            promptText = it
+            sentPrompt = it
+            vm.setPrompt(it)
+        },
         label = { Text("Prompt") },
         enabled = !busy,
         minLines = 2,
@@ -139,9 +164,27 @@ private fun GeneratorCard(s: UiState, vm: MainViewModel) {
     )
 
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Own text state: the field may be empty or mid-edit; only a valid number reaches the form.
+        var seedText by rememberSaveable { mutableStateOf(s.seed.toString()) }
+        var sentSeed by remember { mutableStateOf<Long?>(null) }
+        LaunchedEffect(s.seed) {
+            // Adopt the seed only when it changed elsewhere (history "Use these settings"), not an
+            // echo of this field's own edit: echoes arrive late and would undo a fast delete.
+            val current = vm.state.value.seed
+            if (current != sentSeed) {
+                seedText = current.toString()
+                sentSeed = current
+            }
+        }
         OutlinedTextField(
-            value = s.seed.toString(),
-            onValueChange = { t -> t.toLongOrNull()?.let(vm::setSeed) },
+            value = seedText,
+            onValueChange = { t ->
+                seedText = t.filter(Char::isDigit).take(18)
+                seedText.toLongOrNull()?.let {
+                    sentSeed = it
+                    vm.setSeed(it)
+                }
+            },
             label = { Text("Seed") },
             enabled = !busy && !s.randomSeed,
             singleLine = true,
@@ -160,6 +203,26 @@ private fun GeneratorCard(s: UiState, vm: MainViewModel) {
         steps = 14,
         enabled = !busy,
     )
+
+    if (vm.maxCpuThreads > 1) {
+        val threads = s.policy.cpuThreads
+        Text("CPU threads: $threads" + if (threads == vm.defaultCpuThreads) " (default)" else "")
+        Slider(
+            value = threads.toFloat(),
+            onValueChange = { vm.setCpuThreads(it.roundToInt()) },
+            valueRange = 1f..vm.maxCpuThreads.toFloat(),
+            steps = vm.maxCpuThreads - 2,
+            enabled = !busy,
+        )
+        if (threads != vm.defaultCpuThreads) {
+            Text(
+                "More threads is not always faster: they share the cores with the system. " +
+                    "The default is cores minus two, at most six.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val gpu = s.policy.ditBackend == Backend.GPU
