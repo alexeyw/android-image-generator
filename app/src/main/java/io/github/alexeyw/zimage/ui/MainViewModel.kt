@@ -15,6 +15,7 @@ import io.github.alexeyw.zimage.data.Settings
 import io.github.alexeyw.zimage.data.SettingsStore
 import io.github.alexeyw.zimage.download.ModelDownloader
 import io.github.alexeyw.zimage.pipeline.Backend
+import io.github.alexeyw.zimage.pipeline.PromptText
 import io.github.alexeyw.zimage.pipeline.RuntimePolicy
 import io.github.alexeyw.zimage.pipeline.ZImageMath
 import io.github.alexeyw.zimage.pipeline.ZImagePipeline
@@ -92,7 +93,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _state = MutableStateFlow(
         settingsStore.load(UiState().settings()).let { s ->
-            UiState(prompt = s.prompt, seed = s.seed, randomSeed = s.randomSeed, steps = s.steps, policy = s.policy)
+            UiState(prompt = PromptText.clean(s.prompt), seed = s.seed, randomSeed = s.randomSeed, steps = s.steps, policy = s.policy)
         },
     )
     val state: StateFlow<UiState> = _state
@@ -165,8 +166,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // --- the generator form: every change is persisted -----------------------------------------------
 
+    /** Invisible characters are dropped here, so every input path (typing, any paste) is covered. */
     fun setPrompt(p: String) {
-        _state.update { it.copy(prompt = p) }
+        _state.update { it.copy(prompt = PromptText.clean(p)) }
         persist()
         countTokens()
     }
@@ -186,7 +188,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Loads prompt, seed and configuration of a past generation into the form. */
     fun reuse(e: HistoryEntry) {
-        _state.update { it.copy(prompt = e.prompt, seed = e.seed, randomSeed = false, steps = e.steps) }
+        _state.update { it.copy(prompt = PromptText.clean(e.prompt), seed = e.seed, randomSeed = false, steps = e.steps) }
         applyPolicy(
             RuntimePolicy(
                 ditBackend = e.backend,
@@ -205,7 +207,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun runHeadless(prompt: String?, seed: Long?, steps: Int?, backend: Backend?, keep: Boolean?, threads: Int?) {
         _state.update {
             it.copy(
-                prompt = prompt ?: it.prompt,
+                prompt = prompt?.let(PromptText::clean) ?: it.prompt,
                 seed = seed ?: it.seed,
                 randomSeed = false,
                 steps = (steps ?: it.steps).coerceIn(1, 16),

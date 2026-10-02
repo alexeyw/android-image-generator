@@ -1,5 +1,6 @@
 package io.github.alexeyw.zimage.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -32,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -42,14 +46,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.alexeyw.zimage.pipeline.Backend
+import io.github.alexeyw.zimage.pipeline.PromptText
 import io.github.alexeyw.zimage.pipeline.ZImageMath
 import java.util.Locale
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable
@@ -142,16 +150,45 @@ private fun GeneratorCard(s: UiState, vm: MainViewModel) {
             sentPrompt = current
         }
     }
+    fun replacePrompt(text: String) {
+        promptText = text
+        sentPrompt = text
+        vm.setPrompt(text)
+    }
+    val clipboard = LocalClipboard.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     OutlinedTextField(
         value = promptText,
-        onValueChange = {
-            promptText = it
-            sentPrompt = it
-            vm.setPrompt(it)
-        },
+        onValueChange = ::replacePrompt,
         label = { Text("Prompt") },
         enabled = !busy,
         minLines = 2,
+        trailingIcon = {
+            Column {
+                IconButton(
+                    onClick = {
+                        scope.launch {
+                            val clip = clipboard.getClipEntry()?.clipData
+                            // Invisible characters dropped and edges trimmed: copied text often carries
+                            // both, and every token of the 32-token budget counts.
+                            val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)
+                                ?.coerceToText(context)?.toString()
+                                ?.let { PromptText.clean(it).trim().take(MAX_PASTE_CHARS) }
+                            if (text.isNullOrEmpty()) {
+                                Toast.makeText(context, "The clipboard has no text", Toast.LENGTH_SHORT).show()
+                            } else {
+                                replacePrompt(text)
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                ) { Icon(AppIcons.Paste, contentDescription = "Paste from clipboard") }
+                IconButton(onClick = { replacePrompt("") }, enabled = !busy && promptText.isNotEmpty()) {
+                    Icon(AppIcons.Clear, contentDescription = "Clear prompt")
+                }
+            }
+        },
         isError = s.tokenBudgetExceeded,
         supportingText = {
             val n = s.tokenCount
@@ -300,5 +337,8 @@ private fun KeepScreenOn(on: Boolean) {
         onDispose { view.keepScreenOn = false }
     }
 }
+
+/** Far above the 32-token budget; only keeps a huge clipboard from stalling the tokenizer. */
+private const val MAX_PASTE_CHARS = 2000
 
 private fun gb(bytes: Long) = String.format(Locale.US, "%.2f GB", bytes / 1e9)
